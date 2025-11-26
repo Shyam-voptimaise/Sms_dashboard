@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 import time
 import INIT_PARAMS as IPS
+from pathlib import Path
 
 # Define the initial value of current_flow_rate
 if 'flow_rate' not in st.session_state:
@@ -66,7 +67,8 @@ def update_streamlit():
 st.set_page_config(layout="wide")
 
 # Load Operator file
-st.session_state.df_op = pd.read_excel(IPS.OPERATOR_SHEET)
+operator_sheet = Path(__file__).parent.parent / 'OperatorDetails' / 'OperatorDetails.xlsx'
+st.session_state.df_op = pd.read_excel(operator_sheet)
 st.session_state.df_op = st.session_state.df_op.set_index('Operator', drop=True)
 
 # Create columns for layout
@@ -102,12 +104,15 @@ with left_col:
         etf_placeholder = st.empty()
 
         st.header('Status Lights')
+        redpath = Path(__file__).parent.parent / 'LightImages' / 'Red.png'
+        yellowpath = Path(__file__).parent.parent / 'LightImages' / 'Yellow.png'
+        greenpath = Path(__file__).parent.parent / 'LightImages' / 'Green.png'
         status_images = {
-            'Red': 'LightImages/Red.png',
-            'Yellow': 'LightImages/Yellow.png',
-            'Green': 'LightImages/Green.png'
+            'Red':redpath,
+            'Yellow': yellowpath,
+            'Green':greenpath
         }
-        status_light = st.image('LightImages/Green.png', width=IPS.LIGHT_IMG_WIDTH)
+        status_light = st.image(greenpath, width=IPS.LIGHT_IMG_WIDTH)
 
         ladle_details_submitted = st.form_submit_button("Submit ladle details")
         if ladle_details_submitted:
@@ -116,11 +121,13 @@ with left_col:
 # Right column with Bucket Schematic and Operator Stats
 with right_col:
     st.header('Bucket Schematic')
-    bucket_image = st.image(f'LadleImages/Ladle_image_0.png', width=IPS.LADLE_IMG_WIDTH,
+    init_image =  Path(__file__).parent.parent / 'LadleImages' / 'Ladle_image_0.png'
+    video_gif =  Path(__file__).parent.parent / 'VideoFeed' / 'CameraFeed.gif'
+    bucket_image = st.image(init_image, width=IPS.LADLE_IMG_WIDTH,
                             caption=f'Fill Level: {int(st.session_state.fill_level)}%')
 
     st.header('Live Camera Feed')
-    operation_feed = st.image(f'VideoFeed/CameraFeed.gif', width=IPS.VIDEO_FEED_WIDTH)
+    operation_feed = st.image(video_gif, width=IPS.VIDEO_FEED_WIDTH)
 
 # Initialize the initial sensor reading
 initial_sensor_reading = 1
