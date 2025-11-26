@@ -1,0 +1,8 @@
+YELLOW_PCT = 0.9
+LADLE_IMG_WIDTH = 400
+LIGHT_IMG_WIDTH = 400
+VIDEO_FEED_WIDTH = 400
+
+DENSITY = 7
+
+OPERATOR_SHEET = r'OperatorDetails/OperatorDetails.xlsx'
