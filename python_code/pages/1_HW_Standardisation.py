@@ -1,139 +1,150 @@
-import random
-import numpy as np
-import pandas as pd
+
 import streamlit as st
+import struct
+import math
 import time
-import INIT_PARAMS as IPS
-from pathlib import Path
+import pandas as pd
+from datetime import datetime
+from pymodbus.client import ModbusSerialClient
 
-# Define the initial value of current_flow_rate
-if 'flow_rate' not in st.session_state:
-    st.session_state.flow_rate = []
-if 'fill_level' not in st.session_state:
-    st.session_state.fill_level = 0
-if 'threshold' not in st.session_state:
-    st.session_state.threshold = 0
-if 'df_op' not in st.session_state:
-    st.session_state.df_op = None
+# =====================================================
+# MODBUS CONFIG (VENDOR VERIFIED)
+# =====================================================
+DEFAULT_PORT = "COM14"
+BAUDRATE = 9600
+SLAVE_ID = 1
+
+REG_SPACE_HEIGHT = 4096
+REG_MATERIAL_HEIGHT = 4098
+REG_MATERIAL_PERCENT = 4100
+REG_CURRENT = 4102
+REG_TEMPERATURE = 4110
+
+# =====================================================
+# MODBUS HELPERS (MATCHES YOUR pymodbus SIGNATURE)
+# =====================================================
+
+def read_float(client, address):
+    rr = client.read_holding_registers(address, count=2)
+
+    if rr is None or rr.isError():
+        return None
+
+    r0, r1 = rr.registers
+    raw = bytes([
+        (r0 >> 8) & 0xFF, r0 & 0xFF,
+        (r1 >> 8) & 0xFF, r1 & 0xFF
+    ])
+    return struct.unpack(">f", raw)[0]
 
 
-# Function to update the Streamlit app with sensor data
-def update_streamlit():
-    global initial_sensor_reading
-    count = 0
-    sensor_reading = initial_sensor_reading
-    while True:
-        # Simulate sensor reading (replace with actual sensor code)
-        if count == 0:
-            st.session_state.flow_rate = []
-        flow_ = np.round(0.05 * random.random(), 3)
-        st.session_state.flow_rate.append(flow_)  # 0 to 0.05 fill rate random
-        sensor_reading_new = sensor_reading - st.session_state.flow_rate[count]  # Simulated sensor reading
-        st.session_state.fill_level = min(int(100 * (initial_sensor_reading - sensor_reading)), 100)    # Simulated fill level
+def read_radar(port):
+    client = ModbusSerialClient(
+        port=port,
+        baudrate=BAUDRATE,
+        bytesize=8,
+        parity="N",
+        stopbits=1,
+        timeout=1
+    )
 
-        wt_raw = np.round(st.session_state.fill_level * 0.01 * 3.142 * IPS.DENSITY * 8, 2)
-        wt_mdld = np.round(wt_raw + np.random.randint(-50, 100) * 0.01, 2)
+    # ✅ SET SLAVE ID ON CLIENT (NOT IN FUNCTION CALL)
+    client.unit_id = SLAVE_ID
 
-        etf = np.round((st.session_state.threshold - st.session_state.fill_level) / np.mean(np.array(st.session_state.flow_rate)), 2)
-        etf_c = etf if etf >= 0 else 0
+    if not client.connect():
+        return None
 
-        # Update the Streamlit app
-        fill_level_placeholder.metric(label="Current Fill Level", value=str(st.session_state.fill_level) + " Units")
-        flow_rate_placeholder.metric(label="Current Flow Rate", value=str(flow_) + " Tonnes/minute")
+    data = {
+        "space_height": read_float(client, REG_SPACE_HEIGHT),
+        "material_height": read_float(client, REG_MATERIAL_HEIGHT),
+        "material_percent": read_float(client, REG_MATERIAL_PERCENT),
+        "current": read_float(client, REG_CURRENT),
+        "temperature": read_float(client, REG_TEMPERATURE),
+    }
 
-        wt_raw_placeholder.metric(label="Weight Observed", value=str(wt_raw) + " Tonnes")
-        wt_mdld_placeholder.metric(label="Modelled Weight", value=str(wt_mdld) + " Tonnes")
+    client.close()
+    return data
 
-        etf_placeholder.metric(label="Estimated time to Fill", value=str(np.round(etf_c/10,2)) + " seconds")
+# =====================================================
+# STREAMLIT UI
+# =====================================================
 
-        if st.session_state.fill_level >= st.session_state.threshold:
-            status_light.image(status_images['Red'], width=IPS.LIGHT_IMG_WIDTH)
-            flow_rate_placeholder.metric(label="Current Flow Rate", value=str(0) + " Tonnes/minute")
-            break
-        elif st.session_state.fill_level >= st.session_state.threshold * IPS.YELLOW_PCT:
-            status_light.image(status_images['Yellow'], width=IPS.LIGHT_IMG_WIDTH)
+st.set_page_config(page_title="Radar SMS-2 Dashboard", layout="wide")
+st.title("🔥 Radar-Based Molten Metal Pouring Dashboard")
+
+# ---------------- SIDEBAR ----------------
+st.sidebar.header("⚙️ Configuration")
+
+port = st.sidebar.text_input("COM Port", DEFAULT_PORT)
+
+st.sidebar.subheader("🏗️ Ladle Geometry")
+diameter = st.sidebar.number_input("Ladle Diameter (m)", 0.5, 10.0, 3.0, 0.1)
+ladle_height = st.sidebar.number_input("Ladle Height (m)", 0.5, 20.0, 4.0, 0.1)
+density = st.sidebar.number_input("Metal Density (kg/m³)", 6000, 9000, 7000, 100)
+
+area = math.pi * (diameter / 2) ** 2
+
+target_weight = st.sidebar.number_input(
+    "Target Weight (kg)", 1000.0, 300000.0, 150000.0, 1000.0
+)
+
+# ---------------- LIVE READ ----------------
+radar = read_radar(port)
+
+col1, col2, col3 = st.columns(3)
+
+if radar and radar["material_height"] is not None:
+    level = radar["material_height"]
+    volume = level * area
+    weight = volume * density
+    remaining = max(target_weight - weight, 0)
+
+    with col1:
+        st.subheader("📡 Radar")
+        st.metric("Actual Distance (m)", f"{radar['space_height']:.3f}")
+        st.metric("Material Height (m)", f"{level:.3f}")
+        st.metric("Fill (%)", f"{radar['material_percent']:.2f}")
+
+    with col2:
+        st.subheader("🔧 Sensor")
+        st.metric("Current (mA)", f"{radar['current']:.2f}")
+        st.metric("Temperature (°C)", f"{radar['temperature']:.1f}")
+        st.metric("Time", datetime.now().strftime("%H:%M:%S"))
+
+    with col3:
+        st.subheader("⚖️ Pour Status")
+        st.metric("Weight (kg)", f"{weight:,.0f}")
+        st.metric("Remaining (kg)", f"{remaining:,.0f}")
+        st.progress(min(weight / target_weight, 1.0))
+
+        if weight >= target_weight:
+            st.error("🛑 STOP POURING")
+        elif weight >= 0.9 * target_weight:
+            st.warning("⚠️ SLOW POURING")
         else:
-            status_light.image(status_images['Green'], width=IPS.LIGHT_IMG_WIDTH)
+            st.success("✅ CONTINUE POURING")
 
-        bucket_image.image(f'LadleImages/Ladle_image_{st.session_state.fill_level}.png', width=IPS.LADLE_IMG_WIDTH,
-                           caption=f'Fill Level: {int(st.session_state.fill_level)}%')
+else:
+    st.error("❌ No radar data. Check COM14 and RS-485 wiring.")
 
-        # Sleep for a short interval
-        time.sleep(0.3)
-        count += 1
-        sensor_reading = sensor_reading_new
+# ---------------- TREND ----------------
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-# Set the layout to a two-column format
-st.set_page_config(layout="wide")
+if radar and radar["material_height"] is not None:
+    st.session_state.history.append({
+        "time": datetime.now(),
+        "level": radar["material_height"],
+        "percent": radar["material_percent"]
+    })
 
-# Load Operator file
-operator_sheet = Path(__file__).parent.parent / 'OperatorDetails' / 'OperatorDetails.xlsx'
-st.session_state.df_op = pd.read_excel(operator_sheet)
-st.session_state.df_op = st.session_state.df_op.set_index('Operator', drop=True)
+if len(st.session_state.history) > 300:
+    st.session_state.history = st.session_state.history[-300:]
 
-# Create columns for layout
-left_col, right_col = st.columns(2)
+if st.session_state.history:
+    df = pd.DataFrame(st.session_state.history).set_index("time")
+    st.line_chart(df)
 
-with st.sidebar.form(key="Operator Details"):
-    st.sidebar.header('Operator Details')
-    operator_names = st.session_state.df_op.index.values.tolist()
-    operator_name = st.sidebar.selectbox('Operator Name', (operator_names))
-    performance_val = int(100 * st.session_state.df_op.at[operator_name, 'Adhered']/st.session_state.df_op.at[operator_name, 'Runs'])
-    operator_stopped_count = st.sidebar.metric('Performance %', value=performance_val)
-    op_details_submitted = st.form_submit_button("Submit Details")
-    if op_details_submitted:
-        st.sidebar.success("Operator Details Submitted")
-
-with st.sidebar.form(key="Ladle Details"):
-    st.sidebar.header('Ladle Details')
-    ladle_id = st.sidebar.selectbox('Ladle ID', ('27AX', '32AV', '21AG', '27AV'))
-    tlc_stand = st.sidebar.selectbox('TLC Stand', ('1', '2'))
-    ladle_details_submitted = st.form_submit_button("Submit Ladle")
-    if ladle_details_submitted:
-        st.sidebar.success("Ladle Details Submitted")
-
-# Left column with Fluid Information and Status Lights
-with left_col:
-    with st.form(key="Hotmetal Details"):
-        st.header('Ladle Information')
-        st.session_state.threshold = st.number_input('Threshold Level', min_value=0.0, value=100.0)
-        fill_level_placeholder = st.empty()
-        wt_raw_placeholder = st.empty()
-        wt_mdld_placeholder = st.empty()
-        flow_rate_placeholder = st.empty()
-        etf_placeholder = st.empty()
-
-        st.header('Status Lights')
-        redpath = Path(__file__).parent.parent / 'LightImages' / 'Red.png'
-        yellowpath = Path(__file__).parent.parent / 'LightImages' / 'Yellow.png'
-        greenpath = Path(__file__).parent.parent / 'LightImages' / 'Green.png'
-        status_images = {
-            'Red':redpath,
-            'Yellow': yellowpath,
-            'Green':greenpath
-        }
-        status_light = st.image(greenpath, width=IPS.LIGHT_IMG_WIDTH)
-
-        ladle_details_submitted = st.form_submit_button("Submit ladle details")
-        if ladle_details_submitted:
-            st.success("Ladle Details Submitted")
-
-# Right column with Bucket Schematic and Operator Stats
-with right_col:
-    st.header('Bucket Schematic')
-    init_image =  Path(__file__).parent.parent / 'LadleImages' / 'Ladle_image_0.png'
-    video_gif =  Path(__file__).parent.parent / 'VideoFeed' / 'CameraFeed.gif'
-    bucket_image = st.image(init_image, width=IPS.LADLE_IMG_WIDTH,
-                            caption=f'Fill Level: {int(st.session_state.fill_level)}%')
-
-    st.header('Live Camera Feed')
-    operation_feed = st.image(video_gif, width=IPS.VIDEO_FEED_WIDTH)
-
-# Initialize the initial sensor reading
-initial_sensor_reading = 1
-
-# Start a separate thread to update the Streamlit app
-if ladle_details_submitted:
-    update_streamlit()
-    # Run Streamlit app
-    st.write("Streamlit app running...")  # Placeholder to keep the app running
+# ---------------- AUTO REFRESH ----------------
+time.sleep(0.3)
+st.rerun()
