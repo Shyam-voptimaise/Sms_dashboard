@@ -1,45 +1,33 @@
 import streamlit as st
-import struct, math, time, os
+import math, time, os
 import pandas as pd
 from datetime import datetime
-from pymodbus.client import ModbusSerialClient
-from pymodbus.exceptions import ModbusIOException
+
+from mqtt_client import start_mqtt, latest_data, lock
 
 # =====================================================
-# BASIC CONFIG
+# STREAMLIT CONFIG
 # =====================================================
-DEFAULT_PORT = "COM14"
-BAUDRATE = 9600
-SLAVE_ID = 1
-ENGINEER_PASSWORD = "0000"
+st.set_page_config(page_title="Radar Ladle Pouring", layout="wide")
 
 # =====================================================
-# RADAR REGISTERS (CONFIRMED SAFE)
+# START MQTT ONCE
 # =====================================================
-REG_DISTANCE     = 4096
-REG_CURRENT      = 4102
-REG_TEMPERATURE  = 4110
-
-# ---- Diagnostic (OPTIONAL – radar may reject)
-REG_POWER        = 4120
-REG_SNR          = 4122
-
-# ---- Engineering (safe subset)
-REG_BLIND        = 4210
-REG_RANGE        = 4212
-REG_DAMPING      = 4220
+if "mqtt_started" not in st.session_state:
+    start_mqtt()
+    st.session_state.mqtt_started = True
 
 # =====================================================
-# PROCESS CONSTANTS
+# CONSTANTS
 # =====================================================
-NO_LADLE_DISTANCE   = 16.5
-FULL_LADLE_DISTANCE = 11.5
-STABLE_TIME_SEC     = 3
-FLOW_START_KG_S     = 50
-FLOW_STOP_KG_S      = 10
+FLOW_START_KG_S = 50
+FLOW_STOP_KG_S  = 10
 
 LADLE_DIAMETER_M = 3.0
-METAL_DENSITY = 7000
+METAL_DENSITY   = 7000
+
+MIN_HEIGHT_ALARM = 0.5
+MAX_HEIGHT_ALARM = 14.0
 
 # =====================================================
 # DATA STORAGE
@@ -52,144 +40,83 @@ if not os.path.exists(HISTORY_FILE):
     pd.DataFrame(columns=[
         "pour_id","operator","employee_id","shift",
         "pour_start","pour_end","duration_s",
-        "empty_distance_m","end_distance_m",
+        "material_height_m","fill_pct",
         "total_weight_kg","avg_flow_kg_s"
     ]).to_csv(HISTORY_FILE, index=False)
 
 # =====================================================
-# MODBUS HELPERS (pymodbus 3.x SAFE)
+# RADAR PARSER (MATCHES YOUR PAYLOAD)
 # =====================================================
-def mb_client(port):
-    c = ModbusSerialClient(
-        port=port,
-        baudrate=BAUDRATE,
-        bytesize=8,
-        parity="N",
-        stopbits=1,
-        timeout=1
-    )
-    c.unit_id = SLAVE_ID
-    return c
+def parse_radar(rs):
+    if not isinstance(rs, dict):
+        return None, None, None, None
 
-def read_float(port, reg):
-    c = mb_client(port)
-    if not c.connect():
-        return None
+    rs = {k.lower(): v for k, v in rs.items()}
 
-    rr = c.read_holding_registers(reg, count=2)
-    c.close()
-
-    if rr is None or rr.isError():
-        return None
-
-    r0, r1 = rr.registers
-    raw = bytes([
-        (r0 >> 8) & 0xFF, r0 & 0xFF,
-        (r1 >> 8) & 0xFF, r1 & 0xFF
-    ])
-    return struct.unpack(">f", raw)[0]
-
-# ---- Optional diagnostic read (NO CRASH)
-def read_optional_float(port, reg):
     try:
-        return read_float(port, reg)
-    except Exception:
-        return None
+        material_height = float(rs.get("material_height_m"))
+    except:
+        material_height = None
 
-def write_float(port, reg, value):
     try:
-        c = mb_client(port)
-        if not c.connect():
-            return False, "Connection failed"
+        fill_pct = float(rs.get("material_pct"))
+    except:
+        fill_pct = None
 
-        raw = struct.pack(">f", float(value))
-        rq = c.write_registers(
-            reg,
-            [(raw[0]<<8)|raw[1], (raw[2]<<8)|raw[3]]
-        )
-        c.close()
+    try:
+        current = float(rs.get("current_ma"))
+    except:
+        current = None
 
-        if rq and not rq.isError():
-            return True, "Written"
-        return False, "Rejected"
+    try:
+        temperature = float(rs.get("temp_c"))
+    except:
+        temperature = None
 
-    except ModbusIOException:
-        return False, "Protected register"
+    return material_height, fill_pct, current, temperature
 
 # =====================================================
-# STREAMLIT UI
+# UI HEADER
 # =====================================================
-st.set_page_config("Radar Ladle Pouring", layout="wide")
-st.title("🔥 Radar-Based Ladle Pouring Dashboard")
+st.title("🔥 Radar-Based Ladle Pouring Dashboard (MQTT)")
 
 # =====================================================
-# SIDEBAR – OPERATOR
+# SIDEBAR
 # =====================================================
 st.sidebar.header("👷 Operator Details")
-operator = st.sidebar.text_input("Operator Name")
-employee_id = st.sidebar.text_input("Employee ID")
-shift = st.sidebar.selectbox("Shift", ["A","B","C","Night"])
-port = st.sidebar.text_input("COM Port", DEFAULT_PORT)
-
-# =====================================================
-# ENGINEER MODE
-# =====================================================
-st.sidebar.markdown("---")
-engineer_mode = st.sidebar.checkbox("Engineer Mode")
-if engineer_mode:
-    pwd = st.sidebar.text_input("Password", type="password")
-    engineer_mode = (pwd == ENGINEER_PASSWORD)
-    if not engineer_mode:
-        st.sidebar.error("Invalid password")
+operator     = st.sidebar.text_input("Operator Name")
+employee_id  = st.sidebar.text_input("Employee ID")
+shift        = st.sidebar.selectbox("Shift", ["A","B","C","Night"])
 
 # =====================================================
 # SESSION STATE
 # =====================================================
 ss = st.session_state
-ss.setdefault("empty_distance", None)
-ss.setdefault("stable_since", None)
 ss.setdefault("samples", [])
 ss.setdefault("pouring", False)
 ss.setdefault("pour_start", None)
+ss.setdefault("trend", [])
 
 # =====================================================
-# READ RADAR
+# FETCH MQTT DATA
 # =====================================================
+with lock:
+    frame = latest_data["frame"]
+    gyro  = latest_data["gyro"]
+    rs    = latest_data["rs485"]
+
+material_height, fill_pct, current, temperature = parse_radar(rs)
 now = datetime.now()
-distance = read_float(port, REG_DISTANCE)
-current = read_float(port, REG_CURRENT)
-temperature = read_float(port, REG_TEMPERATURE)
-
-# ---- OPTIONAL diagnostics
-power = read_optional_float(port, REG_POWER)
-snr   = read_optional_float(port, REG_SNR)
 
 # =====================================================
-# EMPTY LADLE AUTO-LEARN
-# =====================================================
-if distance is not None and distance > NO_LADLE_DISTANCE:
-    ss.stable_since = ss.stable_since or now
-    if ss.empty_distance is None and (now - ss.stable_since).total_seconds() >= STABLE_TIME_SEC:
-        ss.empty_distance = distance
-else:
-    ss.stable_since = None
-
-# =====================================================
-# MATERIAL HEIGHT & WEIGHT
+# WEIGHT & FLOW
 # =====================================================
 area = math.pi * (LADLE_DIAMETER_M / 2) ** 2
-material_height = None
 weight = None
-
-if ss.empty_distance and distance:
-    material_height = max(ss.empty_distance - distance, 0)
-    weight = material_height * area * METAL_DENSITY
-
-# =====================================================
-# FLOW RATE
-# =====================================================
 flow = None
-if weight is not None:
+
+if material_height is not None:
+    weight = material_height * area * METAL_DENSITY
     ss.samples.append({"t": now, "w": weight})
     ss.samples = ss.samples[-20:]
 
@@ -215,60 +142,83 @@ if ss.pouring and flow and flow < FLOW_STOP_KG_S:
         now.strftime("%Y%m%d_%H%M%S"),
         operator, employee_id, shift,
         ss.pour_start, now, duration,
-        ss.empty_distance, distance,
+        material_height, fill_pct,
         weight, flow
     ]
     df.to_csv(HISTORY_FILE, index=False)
     ss.samples.clear()
 
 # =====================================================
-# ETA
+# STORE TRENDS (FIXED)
 # =====================================================
-eta = None
-if ss.pouring and flow and distance:
-    remaining_dist = max(distance - FULL_LADLE_DISTANCE, 0)
-    eta = remaining_dist / (flow / METAL_DENSITY) if flow > 0 else None
+if material_height is not None:
+    ss.trend.append({
+        "time": now,
+        "material_height": material_height,
+        "fill_pct": fill_pct,
+        "flow": flow
+    })
 
-# =====================================================
-# DASHBOARD – OPERATOR VIEW
-# =====================================================
-c1, c2, c3 = st.columns(3)
+# ✅ FIXED SLICE (NO INDEX ERROR)
+ss.trend = ss.trend[-300:]
 
-with c1:
-    st.metric("Actual Distance (m)", f"{distance:.3f}" if distance else "—")
-    st.metric("Material Height (m)", f"{material_height:.3f}" if material_height else "—")
-    st.metric(
-        "Fill (%)",
-        f"{(material_height / (ss.empty_distance - FULL_LADLE_DISTANCE)) * 100:.1f}"
-        if material_height and ss.empty_distance else "—"
-    )
-
-with c2:
-    st.metric("Flow Rate (kg/s)", f"{flow:.1f}" if flow else "—")
-    st.metric("ETA (s)", f"{eta:.0f}" if eta else "—")
-    st.metric("Temperature (°C)", f"{temperature:.1f}" if temperature else "—")
-
-with c3:
-    st.metric("Power (dB)", f"{power:.0f}" if power is not None else "—")
-    st.metric("SNR (dB)", f"{snr:.0f}" if snr is not None else "—")
-    st.markdown(f"## {'🟢 POURING' if ss.pouring else '🟡 READY'}")
+trend_df = pd.DataFrame(ss.trend)
 
 # =====================================================
-# ENGINEER SETTINGS (SAFE)
+# VIDEO
 # =====================================================
-if engineer_mode:
-    st.markdown("---")
-    st.subheader("⚙ Engineering Settings")
+st.subheader("📷 Live Camera Feed")
+if frame is not None:
+    st.image(frame)
+else:
+    st.info("Waiting for video stream...")
 
-    blind = st.number_input("Blind Zone (m)", 0.25)
-    rng = st.number_input("Range (m)", 18.0)
-    damp = st.number_input("Damping (s)", 1.0)
+# =====================================================
+# GYRO
+# =====================================================
+st.subheader("🧭 Gyroscope")
+if gyro:
+    cols = st.columns(len(gyro))
+    for col, (k, v) in zip(cols, gyro.items()):
+        col.metric(k, f"{v:.2f}")
 
-    if st.button("Write Parameters"):
-        r1 = write_float(port, REG_BLIND, blind)
-        r2 = write_float(port, REG_RANGE, rng)
-        r3 = write_float(port, REG_DAMPING, damp)
-        st.info(f"{r1[1]} | {r2[1]} | {r3[1]}")
+# =====================================================
+# RADAR METRICS
+# =====================================================
+st.subheader("📡 Radar Readings")
+
+r1, r2, r3, r4 = st.columns(4)
+
+r1.metric("Material Height (m)", f"{material_height:.2f}" if material_height else "—")
+r2.metric("Fill (%)", f"{fill_pct:.1f}%" if fill_pct else "—")
+r3.metric("Flow (kg/s)", f"{flow:.1f}" if flow else "—")
+r4.metric("Temperature (°C)", f"{temperature:.1f}" if temperature else "—")
+
+# =====================================================
+# ALARMS
+# =====================================================
+if material_height is not None:
+    if material_height < MIN_HEIGHT_ALARM:
+        st.error("🔴 LOW LEVEL ALARM")
+    elif material_height > MAX_HEIGHT_ALARM:
+        st.error("🔴 HIGH LEVEL ALARM")
+    else:
+        st.success("🟢 Level Normal")
+
+# =====================================================
+# REAL-TIME CHARTS
+# =====================================================
+st.markdown("---")
+st.subheader("📈 Real-Time Trends")
+
+if not trend_df.empty:
+    st.line_chart(trend_df.set_index("time")[["material_height"]], height=250)
+    st.line_chart(trend_df.set_index("time")[["fill_pct"]], height=250)
+
+    if trend_df["flow"].notna().any():
+        st.line_chart(trend_df.set_index("time")[["flow"]], height=250)
+else:
+    st.info("Waiting for radar data...")
 
 # =====================================================
 # HISTORY
