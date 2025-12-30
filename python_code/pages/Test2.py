@@ -5,6 +5,15 @@ from datetime import datetime
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusIOException
 
+# MQTT (CAMERA + GYRO ONLY)
+from mqtt_client import start_mqtt, latest_data, lock
+
+# =====================================================
+# STREAMLIT CONFIG
+# =====================================================
+st.set_page_config("Radar Ladle Pouring", layout="wide")
+st.title("🔥 Radar-Based Ladle Pouring Dashboard")
+
 # =====================================================
 # BASIC CONFIG
 # =====================================================
@@ -14,17 +23,14 @@ SLAVE_ID = 1
 ENGINEER_PASSWORD = "0000"
 
 # =====================================================
-# RADAR REGISTERS (CONFIRMED SAFE)
+# RADAR REGISTERS (MODBUS)
 # =====================================================
 REG_DISTANCE     = 4096
 REG_CURRENT      = 4102
 REG_TEMPERATURE  = 4110
-
-# ---- Diagnostic (OPTIONAL – radar may reject)
 REG_POWER        = 4120
 REG_SNR          = 4122
 
-# ---- Engineering (safe subset)
 REG_BLIND        = 4210
 REG_RANGE        = 4212
 REG_DAMPING      = 4220
@@ -35,11 +41,12 @@ REG_DAMPING      = 4220
 NO_LADLE_DISTANCE   = 16.5
 FULL_LADLE_DISTANCE = 11.5
 STABLE_TIME_SEC     = 3
-FLOW_START_KG_S     = 50
-FLOW_STOP_KG_S      = 10
+
+FLOW_START_KG_S = 50
+FLOW_STOP_KG_S  = 10
 
 LADLE_DIAMETER_M = 3.0
-METAL_DENSITY = 7000
+METAL_DENSITY   = 7000
 
 # =====================================================
 # DATA STORAGE
@@ -57,7 +64,7 @@ if not os.path.exists(HISTORY_FILE):
     ]).to_csv(HISTORY_FILE, index=False)
 
 # =====================================================
-# MODBUS HELPERS (pymodbus 3.x SAFE)
+# MODBUS HELPERS
 # =====================================================
 def mb_client(port):
     c = ModbusSerialClient(
@@ -75,13 +82,10 @@ def read_float(port, reg):
     c = mb_client(port)
     if not c.connect():
         return None
-
     rr = c.read_holding_registers(reg, count=2)
     c.close()
-
     if rr is None or rr.isError():
         return None
-
     r0, r1 = rr.registers
     raw = bytes([
         (r0 >> 8) & 0xFF, r0 & 0xFF,
@@ -89,7 +93,6 @@ def read_float(port, reg):
     ])
     return struct.unpack(">f", raw)[0]
 
-# ---- Optional diagnostic read (NO CRASH)
 def read_optional_float(port, reg):
     try:
         return read_float(port, reg)
@@ -101,26 +104,24 @@ def write_float(port, reg, value):
         c = mb_client(port)
         if not c.connect():
             return False, "Connection failed"
-
         raw = struct.pack(">f", float(value))
         rq = c.write_registers(
             reg,
             [(raw[0]<<8)|raw[1], (raw[2]<<8)|raw[3]]
         )
         c.close()
-
         if rq and not rq.isError():
             return True, "Written"
         return False, "Rejected"
-
     except ModbusIOException:
         return False, "Protected register"
 
 # =====================================================
-# STREAMLIT UI
+# START MQTT (CAMERA + GYRO ONLY)
 # =====================================================
-st.set_page_config("Radar Ladle Pouring", layout="wide")
-st.title("🔥 Radar-Based Ladle Pouring Dashboard")
+if "mqtt_started" not in st.session_state:
+    start_mqtt()
+    st.session_state.mqtt_started = True
 
 # =====================================================
 # SIDEBAR – OPERATOR
@@ -132,7 +133,7 @@ shift = st.sidebar.selectbox("Shift", ["A","B","C","Night"])
 port = st.sidebar.text_input("COM Port", DEFAULT_PORT)
 
 # =====================================================
-# ENGINEER MODE
+# ENGINEER MODE (MODBUS)
 # =====================================================
 st.sidebar.markdown("---")
 engineer_mode = st.sidebar.checkbox("Engineer Mode")
@@ -153,16 +154,15 @@ ss.setdefault("pouring", False)
 ss.setdefault("pour_start", None)
 
 # =====================================================
-# READ RADAR
+# READ RADAR (MODBUS)
 # =====================================================
 now = datetime.now()
-distance = read_float(port, REG_DISTANCE)
-current = read_float(port, REG_CURRENT)
-temperature = read_float(port, REG_TEMPERATURE)
 
-# ---- OPTIONAL diagnostics
-power = read_optional_float(port, REG_POWER)
-snr   = read_optional_float(port, REG_SNR)
+distance    = read_float(port, REG_DISTANCE)
+current     = read_float(port, REG_CURRENT)
+temperature = read_float(port, REG_TEMPERATURE)
+power       = read_optional_float(port, REG_POWER)
+snr         = read_optional_float(port, REG_SNR)
 
 # =====================================================
 # EMPTY LADLE AUTO-LEARN
@@ -192,7 +192,6 @@ flow = None
 if weight is not None:
     ss.samples.append({"t": now, "w": weight})
     ss.samples = ss.samples[-20:]
-
     if len(ss.samples) >= 2:
         dw = ss.samples[-1]["w"] - ss.samples[-2]["w"]
         dt = (ss.samples[-1]["t"] - ss.samples[-2]["t"]).total_seconds()
@@ -209,7 +208,6 @@ if not ss.pouring and flow and flow > FLOW_START_KG_S:
 if ss.pouring and flow and flow < FLOW_STOP_KG_S:
     ss.pouring = False
     duration = (now - ss.pour_start).total_seconds()
-
     df = pd.read_csv(HISTORY_FILE)
     df.loc[len(df)] = [
         now.strftime("%Y%m%d_%H%M%S"),
@@ -230,8 +228,17 @@ if ss.pouring and flow and distance:
     eta = remaining_dist / (flow / METAL_DENSITY) if flow > 0 else None
 
 # =====================================================
-# DASHBOARD – OPERATOR VIEW
+# MQTT DATA (CAMERA + GYRO)
 # =====================================================
+with lock:
+    frame = latest_data.get("frame")
+    gyro  = latest_data.get("gyro", {})
+
+# =====================================================
+# DASHBOARD – RADAR KPIs
+# =====================================================
+st.subheader("📡 Radar Details")
+
 c1, c2, c3 = st.columns(3)
 
 with c1:
@@ -254,15 +261,38 @@ with c3:
     st.markdown(f"## {'🟢 POURING' if ss.pouring else '🟡 READY'}")
 
 # =====================================================
-# ENGINEER SETTINGS (SAFE)
+# LIVE CAMERA + GYRO (MQTT)
+# =====================================================
+st.markdown("---")
+st.subheader("📷 Live Monitoring")
+
+cam_col, gyro_col = st.columns([1.5, 1])
+
+with cam_col:
+    st.markdown("### Camera Feed")
+    if frame is not None:
+        st.image(frame, width=420)
+    else:
+        st.info("Waiting for camera stream...")
+
+with gyro_col:
+    st.markdown("### Gyroscope")
+    if gyro:
+        for k, v in gyro.items():
+            st.metric(k.upper(), f"{v:.2f}")
+    else:
+        st.info("Waiting for gyro data...")
+
+# =====================================================
+# ENGINEER SETTINGS (MODBUS WRITE)
 # =====================================================
 if engineer_mode:
     st.markdown("---")
     st.subheader("⚙ Engineering Settings")
 
     blind = st.number_input("Blind Zone (m)", 0.25)
-    rng = st.number_input("Range (m)", 18.0)
-    damp = st.number_input("Damping (s)", 1.0)
+    rng   = st.number_input("Range (m)", 18.0)
+    damp  = st.number_input("Damping (s)", 1.0)
 
     if st.button("Write Parameters"):
         r1 = write_float(port, REG_BLIND, blind)

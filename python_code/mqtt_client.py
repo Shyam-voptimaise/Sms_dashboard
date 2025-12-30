@@ -9,7 +9,7 @@ import paho.mqtt.client as mqtt
 # =====================================================
 # MQTT CONFIG
 # =====================================================
-BROKER_IP = "192.168.1.10"
+BROKER_IP = "192.168.118.70"
 
 VIDEO_TOPIC  = "pi/video/frame"
 GYRO_TOPIC   = "pi/gyro/data"
@@ -25,13 +25,12 @@ latest_data = {
 }
 
 lock = threading.Lock()
+_mqtt_started = False   # 🔒 guard
 
 # =====================================================
 # CALLBACK
 # =====================================================
 def on_message(client, userdata, msg):
-    global latest_data
-
     with lock:
         if msg.topic == VIDEO_TOPIC:
             jpg = base64.b64decode(msg.payload)
@@ -61,8 +60,13 @@ def _mqtt_loop():
     client.loop_forever()
 
 # =====================================================
-# START ONCE
+# START ONCE (SAFE FOR STREAMLIT)
 # =====================================================
 def start_mqtt():
+    global _mqtt_started
+    if _mqtt_started:
+        return
+
     t = threading.Thread(target=_mqtt_loop, daemon=True)
     t.start()
+    _mqtt_started = True
