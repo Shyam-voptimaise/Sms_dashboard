@@ -4,6 +4,8 @@ import math
 import os
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
+
 
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusIOException
@@ -16,11 +18,95 @@ from mqtt_client import start_mqtt, latest_data, lock
 # =====================================================
 # STREAMLIT CONFIG
 # =====================================================
-st.set_page_config(page_title="Radar Ladle Pouring", layout="wide")
-st.title("🔥 Radar-Based Ladle Pouring Dashboard")
+# =====================================================
+# COMPACT HEADER + VIEWPORT CONTROL
+# =====================================================
+st.markdown("""
+<style>
+.block-container {
+    padding-top: 2rem;
+    max-width: 1400px;
+}
+
+/* Headings */
+h1, h2, h3, h4 {
+    margin-bottom: 0.7rem !important;
+}
+
+/* Kill Streamlit spacing */
+div[data-testid="stVerticalBlock"],
+div[data-testid="stHorizontalBlock"],
+div[data-testid="column"] {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* Kill internal flex gaps */
+.st-emotion-cache-wfksaw,
+.st-emotion-cache-1r6slb0 {
+    gap: 0 !important;
+}
+
+/* Remove top margin */
+div[data-testid="stVerticalBlock"]:first-child {
+    margin-top: 0 !important;
+}
+
+/* Quad container */
+.quad {
+    padding: 0 !important;
+    margin: 0 !important;
+    line-height: 1.2;
+}
+
+/* Metrics */
+.metric-row {
+    margin-bottom: 1rem;
+}
+
+/* Compact alarm */
+.alarm {
+    background: #ffe6e6;
+    color: #a10000;
+    padding: 0.4rem 0.8rem;
+    border-radius: 6px;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+/* Camera box */
+.camera-box {
+    width: 100%;
+    max-width: 520px;        /* 👈 control WIDTH */
+    height: 320px;           /* 👈 control HEIGHT */
+    margin: 0 auto;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.camera-box img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;       /* 👈 cover | contain | fill */
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+
+
+# st.markdown(
+#     "<div class='dashboard-title'>🔥 Radar-Based Ladle Pouring Dashboard</div>",
+#     unsafe_allow_html=True,
+# )
+
 
 # Refresh UI + Modbus reads every 1s (safe; avoids manual st.rerun hacks)
-st_autorefresh(interval=1000, key="refresh_1s")
+
 
 # =====================================================
 # BASIC CONFIG
@@ -89,6 +175,7 @@ REG_SLAVE_ADDR_I16     = 16390  # 0x4006 (FC=0x06)
 # =====================================================
 # CSV STORAGE (CSV ONLY, as requested)
 # =====================================================
+st_autorefresh(interval=1000, key="refresh_1s")
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -393,17 +480,15 @@ relay2 = read_i16(port, REG_RELAY2_STATUS_I16)
 
 # =====================================================
 # MATERIAL HEIGHT (CALIBRATED OR FALLBACK)
-# Always compute display values so dashboard never shows blank
 # =====================================================
 material_height_m = None
 if ss.empty_distance is not None and distance_m is not None:
     material_height_m = max(ss.empty_distance - distance_m, 0.0)
 else:
-    # fallback to device height
     material_height_m = material_h_dev
 
 # =====================================================
-# GEOMETRY-BASED TONS + FILL FRACTION (ALWAYS if material_height_m exists)
+# GEOMETRY-BASED TONS + FILL FRACTION
 # =====================================================
 geom = LADLE_PROFILES[ladle_type]
 ladle_tons = None
@@ -461,89 +546,163 @@ if (not ss.pouring) and ss.pour_start_time and (ss.start_height is not None):
 with lock:
     frame = latest_data.get("frame")
     gyro = latest_data.get("gyro", {})
-
 # =====================================================
-# DASHBOARD – RADAR DETAILS
+# 🖥️ MAIN DASHBOARD – 4 QUADRANT RESPONSIVE LAYOUT
 # =====================================================
-st.subheader("📡 Radar Details")
 
 if overfill:
-    st.error("🚨 OVERFILL ALARM: Fill exceeds ladle capacity!")
+    st.markdown("""
+    <div class="alarm">
+        🚨 OVERFILL ALARM: Fill exceeds ladle capacity!
+    </div>
+    """, unsafe_allow_html=True)
 
-c1, c2, c3, c4 = st.columns(4)
 
-with c1:
-    st.metric("Space Height / Distance (m)", f"{distance_m:.3f}" if distance_m is not None else "—")
-    st.metric("Material Height (m)", f"{material_height_m:.3f}" if material_height_m is not None else "—")
+def metric_row(label, value):
+    st.markdown(
+        f"""
+        <div class="metric-row">
+            <div class="metric-label">{label}</div>
+            <div class="metric-value">{value}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-with c2:
-    st.metric("Material % (device)", f"{material_pct_dev:.1f}%" if material_pct_dev is not None else "—")
-    st.metric("Ladle Filled (tons)", f"{ladle_tons:.2f}" if ladle_tons is not None else "—")
+# ---------- ROW 1 : Radar + Gyro + Status ----------
+q1, q2, q_status = st.columns([4, 4, 2], gap="medium")
 
-with c3:
-    st.metric("Temperature (°C)", f"{temperature_c:.1f}" if temperature_c is not None else "—")
-    if fill_frac is not None:
-        st.metric("Fill % (geometry)", f"{fill_frac*100:.1f}%")
-    else:
-        st.metric("Fill % (geometry)", "—")
+#  Radar Data
+with q1:
+    st.markdown("<div class='quad'>", unsafe_allow_html=True)
+    st.markdown("### 📡 Radar Data")
 
-with c4:
-    st.metric("Current (mA)", f"{current_ma:.1f}" if current_ma is not None else "—")
-    st.metric("Relay1 / Relay2", f"{relay1}/{relay2}" if relay1 is not None and relay2 is not None else "—")
-    st.markdown(f"## {'🟢 POURING' if ss.pouring else '🟡 READY'}")
 
-# =====================================================
-# 🪣 VIRTUAL LADLE (Geometry-based, tilt while pouring)
-# =====================================================
-st.markdown("### 🪣 Virtual Ladle (Geometry Based)")
+    a, b, c = st.columns(3)
 
-if fill_frac is not None:
-    pct = int(max(0, min(fill_frac, 1.0)) * 100)
-    tilt = 25 if ss.pouring else 0
+    with a:
+        metric_row("Distance (m)", f"{distance_m:.3f}" if distance_m is not None else "—")
+        metric_row("Material Height (m)", f"{material_height_m:.3f}" if material_height_m is not None else "—")
 
-    ladle_svg = f"""
-    <svg width="220" height="360" viewBox="0 0 220 360">
-      <g transform="rotate({tilt},110,180)">
-        <path d="M40 40 Q110 10 180 40 L160 330 Q110 350 60 330 Z"
-              fill="none" stroke="black" stroke-width="4"/>
-        <rect x="60" y="{330 - 2.8*pct}"
-              width="100" height="{2.8*pct}"
-              fill="orange"/>
-        <text x="110" y="180" text-anchor="middle"
-              font-size="14">{pct}%</text>
-      </g>
-    </svg>
-    """
-    st.markdown(ladle_svg, unsafe_allow_html=True)
-else:
-    st.info("Waiting for radar data...")
 
-# =====================================================
-# LIVE CAMERA + GYRO
-# =====================================================
-st.markdown("---")
-st.subheader("📷 Live Monitoring")
+    with b:
+        metric_row("Device Fill %", f"{material_pct_dev:.1f}%" if material_pct_dev is not None else "—")
+        metric_row("Calculated Tons", f"{ladle_tons:.2f}" if ladle_tons is not None else "—")
 
-cam_col, gyro_col = st.columns([1.5, 1])
 
-with cam_col:
-    cam_ph = st.empty()
-    if frame is not None:
-        cam_ph.image(frame, width=420)
-    else:
-        cam_ph.info("Waiting for camera stream...")
+    with c:
+        metric_row("Current (mA)", f"{current_ma:.1f}" if current_ma is not None else "—")
+        metric_row("Temperature (°C)", f"{temperature_c:.1f}" if temperature_c is not None else "—")
+        # metric_row("Relay 1", relay1 if relay1 is not None else "—")
+        # metric_row("Relay 2", relay2 if relay2 is not None else "—")
 
-with gyro_col:
-    gyro_ph = st.empty()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+# ---------- Gyro ----------
+with q2:
+    st.markdown("<div class='quad'>", unsafe_allow_html=True)
+    st.markdown("### 🧭 Gyro")
+
+    # 🔧 CONTROL WHAT YOU WANT TO SHOW HERE (order matters)
+    GYRO_FIELDS = [
+        ("Gyro X", "gyro_x"),
+        ("Gyro Y", "gyro_y"),
+        ("Gyro Z", "gyro_z"),
+        ("Accel X", "accel_x"),
+        ("Accel Y", "accel_y"),
+        ("Accel Z", "accel_z"),
+    ]
+
+    g1, g2, g3 = st.columns(3)
+    cols = [g1, g2, g3]
+
     if gyro:
-        with gyro_ph.container():
-            for k, v in gyro.items():
+        for i, (label, key) in enumerate(GYRO_FIELDS):
+            col = cols[i % 3]
+
+            value = "—"
+            if key in gyro and gyro[key] is not None:
                 try:
-                    st.metric(k.upper(), f"{float(v):.2f}")
+                    value = f"{float(gyro[key]):.2f}"
                 except Exception:
-                    st.metric(k.upper(), str(v))
+                    value = str(gyro[key])
+
+            with col:
+                metric_row(label, value)
     else:
-        gyro_ph.info("Waiting for gyro data...")
+        metric_row("STATUS", "Waiting for gyro data...")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+#  POUR STATUS (same row)
+with q_status:
+    st.markdown(
+        f"""
+        <div style="
+            height: var(--quadH);
+            display: flex;
+            align-items: flex-start;   /* ⬅ top aligned */
+            justify-content: flex-start;
+            font-size: 1.6em;
+            font-weight: 700;
+            white-space: nowrap;
+            padding-top: 1rem;       /* optional spacing from top */
+        ">
+            {'🟢 POURING' if ss.pouring else '🟡 READY'}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+
+# ---------- ROW 2 : Bucket Schematic + Camera ----------
+q3, q4 = st.columns(2, gap="medium")
+
+# 🪣 Bucket Schematic (driven by RADAR Device Fill %)
+with q3:
+    st.markdown("<div class='quad'>", unsafe_allow_html=True)
+    st.markdown("### 🪣 Bucket Schematic")
+
+    # ✅ Use RADAR Device Fill %
+    fill_pct = int(round(material_pct_dev)) if material_pct_dev is not None else 0
+    fill_pct = max(0, min(fill_pct, 100))
+
+    # snap to available images (0,5,10...)
+    fill_pct = int(round(fill_pct / 5) * 5)
+
+    ladle_img_path = (
+        Path(__file__).parent.parent
+        / "LadleImages"
+        / f"Ladle_Image_{fill_pct}.png"
+    )
+
+    if ladle_img_path.exists():
+        st.image(
+            str(ladle_img_path),
+            width=300,
+            caption=f"Fill Level: {fill_pct}%"
+        )
+    else:
+        st.warning(f"Missing image: {ladle_img_path.name}")
+
+
+# 4️⃣ Camera
+with q4:
+    st.markdown("<div class='quad'>", unsafe_allow_html=True)
+    st.markdown("### 📷 Camera")
+
+    if frame is not None:
+        st.image(frame, width=400)
+        st.markdown("</div>", unsafe_allow_html=True)
+    else:
+        st.info("Waiting for camera stream...")
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 
 # =====================================================
 # ENGINEERING MODE – ALL PARAMETERS FROM MANUAL

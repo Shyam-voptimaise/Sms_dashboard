@@ -9,7 +9,7 @@ import paho.mqtt.client as mqtt
 # =====================================================
 # MQTT CONFIG
 # =====================================================
-BROKER_IP = "192.168.118.70"
+BROKER_IP = "192.168.118.118"
 
 VIDEO_TOPIC  = "pi/video/frame"
 GYRO_TOPIC   = "pi/gyro/data"
