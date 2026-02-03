@@ -479,13 +479,10 @@ relay1 = read_i16(port, REG_RELAY1_STATUS_I16)
 relay2 = read_i16(port, REG_RELAY2_STATUS_I16)
 
 # =====================================================
-# MATERIAL HEIGHT (CALIBRATED OR FALLBACK)
+# MATERIAL HEIGHT (RADAR DIRECT – NO LADLE PROFILE)
 # =====================================================
-material_height_m = None
-if ss.empty_distance is not None and distance_m is not None:
-    material_height_m = max(ss.empty_distance - distance_m, 0.0)
-else:
-    material_height_m = material_h_dev
+material_height_m = material_h_dev
+
 
 # =====================================================
 # GEOMETRY-BASED TONS + FILL FRACTION
