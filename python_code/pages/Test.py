@@ -32,22 +32,22 @@ st.markdown("""
 st_autorefresh(interval=1000, key="refresh")
 
 # =====================================================
-# BASIC CONFIG
+# BASIC CONFIG (FROM DOCUMENT)
 # =====================================================
 DEFAULT_PORT = "COM14"
 BAUDRATE = 9600
-SLAVE_ID = 1
+SLAVE_ID = 1   # device default (configured in radar)
 
 TONS_PER_METER = 45.0
 MAX_SAFE_TONS = 170.0
 
 # =====================================================
-# MODBUS REGISTERS
+# MODBUS REGISTERS (DOCUMENT VERIFIED)
 # =====================================================
-REG_SPACE_HEIGHT_F = 4096
-REG_MATERIAL_PCT_F = 4100
-REG_CURRENT_F = 4102
-REG_TEMPERATURE_F = 4110
+REG_SPACE_HEIGHT_F = 4096   # 0x1000
+REG_MATERIAL_PCT_F = 4100   # 0x1004
+REG_CURRENT_F = 4102        # 0x1006
+REG_TEMPERATURE_F = 4110    # 0x100E
 
 # =====================================================
 # DATA STORAGE
@@ -58,7 +58,6 @@ os.makedirs(DATA_DIR, exist_ok=True)
 HISTORY_FILE = os.path.join(DATA_DIR, "pour_history.csv")
 PROFILE_FILE = os.path.join(DATA_DIR, "ladle_profiles.csv")
 
-# ---- Pour history (Operator ID added)
 if not os.path.exists(HISTORY_FILE):
     pd.DataFrame(columns=[
         "ladle_id",
@@ -75,7 +74,6 @@ if not os.path.exists(HISTORY_FILE):
         "bottom_line_m"
     ]).to_csv(HISTORY_FILE, index=False)
 
-# ---- Ladle profile (explicit bottom line)
 if not os.path.exists(PROFILE_FILE):
     pd.DataFrame(columns=[
         "ladle_id",
@@ -84,10 +82,10 @@ if not os.path.exists(PROFILE_FILE):
     ]).to_csv(PROFILE_FILE, index=False)
 
 # =====================================================
-# MODBUS HELPERS (YOUR CONFIRMED SIGNATURE)
+# MODBUS HELPERS (DOCUMENT STYLE)
 # =====================================================
 def mb_client(port: str) -> ModbusSerialClient:
-    client = ModbusSerialClient(
+    return ModbusSerialClient(
         port=port,
         baudrate=BAUDRATE,
         bytesize=8,
@@ -95,15 +93,15 @@ def mb_client(port: str) -> ModbusSerialClient:
         stopbits=1,
         timeout=1,
     )
-    client.unit_id = SLAVE_ID
-    return client
 
 def read_f32(port: str, reg: int):
     client = mb_client(port)
     if not client.connect():
         return None
 
+    # ✔ EXACTLY as per document examples
     rr = client.read_holding_registers(reg, count=2)
+
     client.close()
 
     if rr is None or rr.isError():
@@ -130,7 +128,7 @@ ss.setdefault("bottom_line", None)
 # SIDEBAR – OPERATOR / LADLE
 # =====================================================
 st.sidebar.header("👷 Operator Details")
-operator_id = st.sidebar.text_input("Operator ID")   # ✅ ID, not name
+operator_id = st.sidebar.text_input("Operator ID")
 shift = st.sidebar.selectbox("Shift", ["A", "B", "C", "Night"])
 port = st.sidebar.text_input("COM Port", DEFAULT_PORT)
 
@@ -166,7 +164,7 @@ else:
         ss.pouring = False
 
 # =====================================================
-# CALIBRATION – SET BOTTOM LINE
+# CALIBRATION – BOTTOM LINE (DOCUMENT LOGIC)
 # =====================================================
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧭 Ladle Bottom Line")
@@ -179,14 +177,9 @@ if ss.bottom_line is not None:
 if st.sidebar.button("Set Current Distance as Bottom Line"):
     if ladle_id and distance_m is not None:
         ss.bottom_line = distance_m
-
         dfp = pd.read_csv(PROFILE_FILE)
         dfp = dfp[dfp["ladle_id"] != ladle_id]
-        dfp.loc[len(dfp)] = [
-            ladle_id,
-            distance_m,
-            datetime.now().isoformat()
-        ]
+        dfp.loc[len(dfp)] = [ladle_id, distance_m, datetime.now().isoformat()]
         dfp.to_csv(PROFILE_FILE, index=False)
         st.sidebar.success("Bottom line saved")
 
@@ -198,7 +191,7 @@ current_ma = read_f32(port, REG_CURRENT_F)
 temperature_c = read_f32(port, REG_TEMPERATURE_F)
 
 # =====================================================
-# LIVE WEIGHT CALCULATION (BOTTOM LINE BASED)
+# LIVE WEIGHT CALCULATION
 # =====================================================
 metal_height = None
 ladle_tons = None
@@ -207,12 +200,11 @@ overfill = False
 if distance_m is not None and ss.bottom_line is not None:
     metal_height = max(0.0, ss.bottom_line - distance_m)
     ladle_tons = metal_height * TONS_PER_METER
-
     if ladle_tons >= MAX_SAFE_TONS:
         overfill = True
 
 # =====================================================
-# SAVE HISTORY (WITH OPERATOR ID + BOTTOM LINE)
+# SAVE HISTORY
 # =====================================================
 if ss.pouring and ss.start_height is None and metal_height is not None:
     ss.start_height = metal_height
