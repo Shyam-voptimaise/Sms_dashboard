@@ -117,23 +117,14 @@ SLAVE_ID = 1
 ENGINEER_PASSWORD = "0000"
 
 # =====================================================
-# LADLE GEOMETRY PROFILES (EDIT/EXTEND AS NEEDED)
-# Conical frustum approximation: bottom_diameter -> top_diameter over height
+# CORRECT LADLE GEOMETRY (AUTHORITATIVE)
 # =====================================================
-LADLE_PROFILES = {
-    "LADLE_150T": {
-        "height_m": 3.2,
-        "top_diameter_m": 3.72,
-        "bottom_diameter_m": 2.20,
-        "capacity_tons": 150,
-    },
-    "LADLE_100T": {
-        "height_m": 2.8,
-        "top_diameter_m": 3.20,
-        "bottom_diameter_m": 2.00,
-        "capacity_tons": 100,
-    },
-}
+EMPTY_REFERENCE_DISTANCE = 14.51   # m
+R_BOTTOM = 1.55                    # m
+WALL_ANGLE_DEG = 0.9               # degrees
+STEEL_DENSITY = 6.8                # t/m3
+
+TAN_THETA = math.tan(math.radians(WALL_ANGLE_DEG))
 
 # Alarm if > (1 + OVERFILL_TOL) * capacity
 OVERFILL_TOL = 0.02
@@ -386,7 +377,6 @@ port = st.sidebar.text_input("COM Port", DEFAULT_PORT)
 st.sidebar.markdown("---")
 st.sidebar.subheader("🪣 Ladle Profile")
 ladle_id = st.sidebar.text_input("Ladle ID", value="")
-ladle_type = st.sidebar.selectbox("Ladle Type", list(LADLE_PROFILES.keys()))
 track_no = st.sidebar.selectbox("Track / Line", ["Track-1", "Track-2", "Track-3"])
 pour_no = st.sidebar.selectbox("Pour Count", [1, 2])
 
@@ -483,29 +473,34 @@ relay2 = read_i16(port, REG_RELAY2_STATUS_I16)
 # =====================================================
 material_height_m = material_h_dev
 
-
 # =====================================================
-# GEOMETRY-BASED TONS + FILL FRACTION
+# CORRECT GEOMETRY-BASED TONS (0.9° WALL INCLINATION)
 # =====================================================
-geom = LADLE_PROFILES[ladle_type]
 ladle_tons = None
 fill_frac = None
 overfill = False
 
-if material_height_m is not None:
-    H = geom["height_m"]
-    r_bottom = geom["bottom_diameter_m"] / 2.0
-    r_top = geom["top_diameter_m"] / 2.0
+if distance_m is not None:
+    # Actual filled height
+    height_fill = max(EMPTY_REFERENCE_DISTANCE - distance_m, 0.0)
 
-    h = max(0.0, min(material_height_m, H))
-    r_h = r_bottom + (r_top - r_bottom) * (h / H if H > 0 else 0.0)
+    # Radius at current fill level
+    R_fill = R_BOTTOM + height_fill * TAN_THETA
 
-    volume_m3 = (math.pi * h / 3.0) * (r_bottom**2 + r_bottom * r_h + r_h**2)
-    ladle_tons = (volume_m3 * 7000.0) / 1000.0
-    fill_frac = ladle_tons / float(geom["capacity_tons"]) if geom["capacity_tons"] else None
+    # Conical frustum volume
+    volume_m3 = (math.pi * height_fill / 3.0) * (
+        R_fill**2 + R_fill * R_BOTTOM + R_BOTTOM**2
+    )
 
-    if fill_frac is not None and fill_frac > (1.0 + OVERFILL_TOL):
-        overfill = True
+    # Weight in tons
+    ladle_tons = volume_m3 * STEEL_DENSITY
+
+    # Optional overfill check (still supported)
+    geom = LADLE_PROFILES[ladle_type]
+    if geom.get("capacity_tons"):
+        fill_frac = ladle_tons / float(geom["capacity_tons"])
+        if fill_frac > (1.0 + OVERFILL_TOL):
+            overfill = True
 
 # Save start values on first frame after start
 if ss.pouring and ss.start_height is None and material_height_m is not None:
@@ -573,6 +568,7 @@ q1, q2, q_status = st.columns([4, 4, 2], gap="medium")
 with q1:
     st.markdown("<div class='quad'>", unsafe_allow_html=True)
     st.markdown("### 📡 Radar Data")
+    metric_row("Filled Height (m)", f"{height_fill:.3f}" if distance_m is not None else "—")
 
 
     a, b, c = st.columns(3)
@@ -850,4 +846,4 @@ st.dataframe(pd.read_csv(HISTORY_FILE), use_container_width=True)
 
 st.markdown("---")
 st.subheader("🧠 Ladle Calibration Memory (CSV)")
-st.dataframe(pd.read_csv(PROFILE_FILE), use_container_width=True)
+st.dataframe(pd.read_csv(PROFILE_FILE), use_container_width=True) 

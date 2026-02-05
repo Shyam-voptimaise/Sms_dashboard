@@ -1,0 +1,2 @@
+timestamp,ladle_id,operator,shift,radar_distance_m,filled_height_m,calculated_tons,flow_rate_tps,state
+2026-02-05T13:38:38,03,Shyam,A,6.463,0.0004,0.011,0.0,POURING
